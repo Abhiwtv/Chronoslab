@@ -1,0 +1,67 @@
+Hey, here’s the plan for ChronosLab:
+
+**1. Backend Work**
+
+* I’ve added all the notebooks in this folder.
+* Go through them once (don’t worry if everything isn’t clear).
+* Use Claude to help interpret and clean up the logic.
+
+**Task:**
+
+* Convert notebooks into backend-ready Python modules.
+* Create **2 separate files** (one per notebook / domain).
+* Expose their functionality via routes in `main.py`.
+
+---
+
+**2. Frontend Work**
+
+* Add a **toggle switch** with 3 modes:
+
+  * Statistical
+  * Supply-Demand
+  * Finance
+
+* For each mode:
+
+  * Add:
+
+    * **Demo Button**
+    * **Drag & Drop upload**
+
+---
+
+**3. Demo Configurations**
+
+* **Supply-Demand:**
+
+  * Use datasets/models from:
+
+    * NYC Cabs
+    * Bike Demand (from notebook)
+
+* **Finance:**
+
+  * Use BTC dataset from notebook
+
+* **The results page:**
+
+  * UI should resemble notebook output
+  * Feel free to improve UX if needed
+
+---
+
+**4. Goal**
+
+* Generalize each module so it works for similar datasets (not just demo ones)
+
+---
+
+**5. Timeline**
+
+* Deadline: **This weekend**
+* Keep pushing updates regularly
+
+---
+
+Ping me if anything is unclear.
