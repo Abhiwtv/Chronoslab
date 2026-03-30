@@ -10,65 +10,78 @@ export default function Home() {
   const [fileName, setFileName] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [rawCSV, setRawCSV] = useState<string>("")
-
+  const [currentMode, setCurrentMode] = useState<string>("statistical")
   const [isClient, setIsClient] = useState(false);
 
- const handleFileLoaded = useCallback(async (csvText: string, name: string) => {
+  const syncWithBackend = useCallback(async (csvText: string, name: string, mode: string, col: string, baseParsed: ParsedData) => {
+    try {
+      const formData = new FormData()
+      const file = new File([csvText], name, { type: "text/csv" })
+      formData.append("file", file)
+      formData.append("column", col)
+
+      const response = await fetch(`http://127.0.0.1:8000/forecast/${mode}`, {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP Error ${response.status}: Failed to reach FastAPI`)
+      }
+
+      const pythonResult = await response.json()
+      
+      // Safety check in case FastAPI returned a dict with error via 200 somehow
+      if (pythonResult.error || pythonResult.detail) {
+        throw new Error(pythonResult.error || pythonResult.detail)
+      }
+
+      console.log("✅ Python Logic Success:", pythonResult.sMAPE)
+
+      // OVERWRITE the local "dumb" forecast with the Python "smart" forecast
+      const finalParsed: ParsedData = {
+        ...baseParsed,
+        seasonal: pythonResult.is_seasonal,
+        seasonalStrength: pythonResult.seasonal_strength,
+        forecast: {
+          ...baseParsed.forecast,
+          model: pythonResult.best_model || "Unknown",
+          smape: typeof pythonResult.sMAPE === 'number' ? pythonResult.sMAPE : baseParsed.forecast.smape,
+          mape: typeof pythonResult.MAPE === 'number' ? pythonResult.MAPE : baseParsed.forecast.mape,
+          differencing: pythonResult.differencing || 0,
+          test: baseParsed.forecast.test.map((item, index) => ({
+            ...item,
+            predicted: pythonResult.predictions && pythonResult.predictions[index] !== undefined 
+              ? pythonResult.predictions[index] 
+              : item.predicted
+          }))
+        }
+      }
+      setData(finalParsed)
+      setFileName(name)
+    } catch (err) {
+      console.log("❌ Backend not reachable or error occurred, using local fallback", err)
+      setData(baseParsed)
+      setFileName(name)
+    }
+  }, [])
+
+ const handleFileLoaded = useCallback(async (csvText: string, name: string, mode: string) => {
     try {
       setError(null)
       setRawCSV(csvText)
+      setCurrentMode(mode)
 
-      // 1. Run the local frontend parse first (provides initial structures)
+      // 1. Run the local frontend parse first
       let parsed = parseCSV(csvText)
       
-      // 2. Call the Python Backend
-      try {
-        const formData = new FormData()
-        const file = new File([csvText], name, { type: "text/csv" })
-        formData.append("file", file)
-
-        const response = await fetch("http://127.0.0.1:8000/forecast", {
-          method: "POST",
-          body: formData,
-        })
-
-        if (response.ok) {
-          const pythonResult = await response.json()
-          console.log("✅ Python Logic Success:", pythonResult.sMAPE)
-
-          // 3. OVERWRITE the local "dumb" forecast with the Python "smart" forecast
-          parsed = {
-            ...parsed,
-            seasonal: pythonResult.is_seasonal,
-            seasonalStrength: pythonResult.seasonal_strength,
-            forecast: {
-              ...parsed.forecast,
-              model: pythonResult.best_model,
-              smape: pythonResult.sMAPE, // THIS is the 2.60%
-              mape: pythonResult.MAPE,
-              differencing: pythonResult.differencing,
-              // Update the chart predictions to match the Python model
-              test: parsed.forecast.test.map((item, index) => ({
-                ...item,
-                predicted: pythonResult.predictions[index] !== undefined 
-                  ? pythonResult.predictions[index] 
-                  : item.predicted
-              }))
-            }
-          }
-        }
-      } catch (err) {
-        console.log("❌ Backend not reachable, using local fallback", err)
-      }
-
-      // 4. Set the FINAL data (now containing the 2.60%)
-      setData(parsed)
-      setFileName(name)
+      // 2. Call the backend sync process
+      await syncWithBackend(csvText, name, mode, parsed.targetCol, parsed)
 
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to parse CSV")
     }
-  }, [])
+  }, [syncWithBackend])
 
   const handleReset = useCallback(() => {
     setData(null)
@@ -78,46 +91,21 @@ export default function Home() {
   }, [])
 
   const handleColumnChange = useCallback(
-    (col: string) => {
+    async (col: string) => {
       if (!rawCSV) return
       try {
-        const lines = rawCSV.trim().split("\n")
-        const headers = lines[0].split(",").map((h) => h.trim().replace(/"/g, ""))
-        const colIdx = headers.indexOf(col)
-        if (colIdx === -1) return
-
-        const parsed = parseCSV(rawCSV)
+        const parsed = parseCSV(rawCSV, col)
         const newHeaders = [...parsed.headers]
         const numIdx = newHeaders.indexOf(col)
 
         if (numIdx !== -1) {
-          const newData: ParsedData = {
-            ...parsed,
-            targetCol: col,
-            timeSeries: parsed.rows
-              .map((r) => {
-                const dateStr = String(r[parsed.datetimeCol])
-                const d = new Date(dateStr)
-                const val = Number(r[col])
-                if (isNaN(d.getTime()) || isNaN(val)) return null
-                return {
-                  date: d.toISOString().split("T")[0],
-                  value: val,
-                  timestamp: d.getTime(),
-                }
-              })
-              .filter(Boolean) as ParsedData["timeSeries"],
-          }
-
-          newData.timeSeries.sort((a, b) => a.timestamp - b.timestamp)
-          setData(newData)
+          await syncWithBackend(rawCSV, fileName, currentMode, col, parsed)
         }
-
       } catch {
         // silently ignore
       }
     },
-    [rawCSV]
+    [rawCSV, fileName, currentMode, syncWithBackend]
   )
 
   if (error) {

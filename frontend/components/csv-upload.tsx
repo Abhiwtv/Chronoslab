@@ -2,9 +2,10 @@
 
 import { useCallback, useState, useEffect, useRef } from "react"
 import { Upload, FileText, Atom, Database, BarChart3, Cpu } from "lucide-react"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 interface CSVUploadProps {
-  onFileLoaded: (csvText: string, fileName: string) => void
+  onFileLoaded: (csvText: string, fileName: string, mode: "statistical" | "supply-demand" | "finance") => void
 }
 
 function FloatingParticle({ delay, x, duration }: { delay: number; x: number; duration: number }) {
@@ -45,12 +46,15 @@ function PipelineStep({ icon, label, active, done }: { icon: React.ReactNode; la
 }
 
 export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
+  const [mounted, setMounted] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [pipelineStep, setPipelineStep] = useState(0)
-  const timerRef = useRef<NodeJS.Timeout>()
+  const [mode, setMode] = useState<"statistical" | "supply-demand" | "finance">("statistical")
+  const timerRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
   useEffect(() => {
+    setMounted(true)
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current)
     }
@@ -72,7 +76,7 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
             i++
             timerRef.current = setTimeout(advance, 600)
           } else {
-            onFileLoaded(text, file.name)
+            onFileLoaded(text, file.name, mode)
             setIsProcessing(false)
           }
         }
@@ -96,17 +100,48 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
   const loadSampleData = useCallback(() => {
     setIsProcessing(true)
     setPipelineStep(0)
-    const headers = "Date,Temperature,Humidity,Pressure\n"
+    let headers = ""
     const rows: string[] = []
     const start = new Date("2021-01-01")
-    let temp = 15, hum = 60, pres = 1013
-    for (let i = 0; i < 730; i++) {
-      const d = new Date(start.getTime() + i * 86400000)
-      temp += (Math.random() - 0.48) * 2 + Math.sin((i / 365) * Math.PI * 2) * 0.5
-      hum += (Math.random() - 0.5) * 3 + Math.cos((i / 365) * Math.PI * 2) * 0.3
-      pres += (Math.random() - 0.5) * 2
-      rows.push(`${d.toISOString().split("T")[0]},${temp.toFixed(1)},${Math.max(20, Math.min(95, hum)).toFixed(1)},${pres.toFixed(1)}`)
+
+    if (mode === "statistical") {
+      headers = "Date,Temperature,Humidity,Pressure\n"
+      let temp = 15, hum = 60, pres = 1013
+      for (let i = 0; i < 730; i++) {
+        const d = new Date(start.getTime() + i * 86400000)
+        temp += (Math.random() - 0.48) * 2 + Math.sin((i / 365) * Math.PI * 2) * 0.5
+        hum += (Math.random() - 0.5) * 3 + Math.cos((i / 365) * Math.PI * 2) * 0.3
+        pres += (Math.random() - 0.5) * 2
+        rows.push(`${d.toISOString().split("T")[0]},${temp.toFixed(1)},${Math.max(20, Math.min(95, hum)).toFixed(1)},${pres.toFixed(1)}`)
+      }
+    } else if (mode === "supply-demand") {
+      headers = "Date,Demand,Supply,Price\n"
+      let demand = 1000, supply = 1000, price = 50
+      for (let i = 0; i < 730; i++) {
+        const d = new Date(start.getTime() + i * 86400000)
+        demand += (Math.random() - 0.45) * 50 + Math.sin((i / 365) * Math.PI * 2) * 200
+        supply += (Math.random() - 0.5) * 40 + Math.cos((i / 365) * Math.PI * 2) * 100
+        price = 50 + (demand - supply) * 0.05
+        rows.push(`${d.toISOString().split("T")[0]},${Math.max(0, demand).toFixed(0)},${Math.max(0, supply).toFixed(0)},${Math.max(1, price).toFixed(2)}`)
+      }
+    } else if (mode === "finance") {
+      headers = "Date,Open,High,Low,Close,Volume\n"
+      let price = 150
+      for (let i = 0; i < 730; i++) {
+        const d = new Date(start.getTime() + i * 86400000)
+        if (d.getDay() === 0 || d.getDay() === 6) {
+          continue // skip weekends for realistic finance data dates
+        }
+        const open = price + (Math.random() - 0.5) * 2
+        const high = open + Math.random() * 3
+        const low = open - Math.random() * 3
+        const close = open + (Math.random() - 0.5) * 4
+        price = close
+        const volume = Math.floor(1000000 + Math.random() * 500000)
+        rows.push(`${d.toISOString().split("T")[0]},${open.toFixed(2)},${high.toFixed(2)},${low.toFixed(2)},${close.toFixed(2)},${volume}`)
+      }
     }
+
     const text = headers + rows.join("\n")
     let step = 0
     const advance = () => {
@@ -115,12 +150,13 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
         step++
         timerRef.current = setTimeout(advance, 500)
       } else {
-        onFileLoaded(text, "weather_sample_2yr.csv")
+        const fileName = mode === "statistical" ? "weather_sample.csv" : mode === "supply-demand" ? "supply_demand_sample.csv" : "finance_sample.csv"
+        onFileLoaded(text, fileName, mode)
         setIsProcessing(false)
       }
     }
     timerRef.current = setTimeout(advance, 300)
-  }, [onFileLoaded])
+  }, [onFileLoaded, mode])
 
   const triggerFileInput = useCallback(() => {
     const input = document.createElement("input")
@@ -137,7 +173,7 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background relative overflow-hidden">
         <div className="absolute inset-0 bg-dot-grid animate-grid-pulse" />
-        {Array.from({ length: 30 }).map((_, i) => (
+        {mounted && Array.from({ length: 30 }).map((_, i) => (
           <FloatingParticle key={i} delay={Math.random() * 5} x={Math.random() * 100} duration={Math.random() * 4 + 3} />
         ))}
         <div className="relative z-10 flex flex-col items-center gap-10">
@@ -180,7 +216,7 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
     <div className="flex min-h-screen flex-col items-center justify-center bg-background relative overflow-hidden">
       {/* Background effects */}
       <div className="absolute inset-0 bg-dot-grid opacity-50" />
-      {Array.from({ length: 15 }).map((_, i) => (
+      {mounted && Array.from({ length: 15 }).map((_, i) => (
         <FloatingParticle key={i} delay={Math.random() * 8} x={Math.random() * 100} duration={Math.random() * 5 + 4} />
       ))}
 
@@ -205,6 +241,32 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
               Temporal Intelligence Engine
             </p>
           </div>
+        </div>
+
+        {/* Mode Toggle Tabs */}
+        <div className="w-full flex justify-center animate-float-up" style={{ animationDelay: "50ms" }}>
+          <Tabs value={mode} onValueChange={(v) => setMode(v as any)} className="w-full max-w-sm">
+            <TabsList className="grid w-full grid-cols-3 bg-secondary/30 border border-border/50 backdrop-blur-md p-1 rounded-xl">
+              <TabsTrigger 
+                value="statistical" 
+                className="rounded-lg data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-[0_0_10px_rgba(0,180,255,0.2)] transition-all text-xs"
+              >
+                Statistical
+              </TabsTrigger>
+              <TabsTrigger 
+                value="supply-demand" 
+                className="rounded-lg data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-[0_0_10px_rgba(0,180,255,0.2)] transition-all text-xs"
+              >
+                Supply-Demand
+              </TabsTrigger>
+              <TabsTrigger 
+                value="finance" 
+                className="rounded-lg data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-[0_0_10px_rgba(0,180,255,0.2)] transition-all text-xs"
+              >
+                Finance
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         </div>
 
         {/* Drop Zone */}
@@ -283,8 +345,10 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
             <Database className="h-4 w-4 text-primary" />
           </div>
           <div className="flex flex-col items-start gap-0.5">
-            <span className="text-sm font-medium text-foreground">Load sample dataset</span>
-            <span className="font-mono text-[10px] text-muted-foreground">730 days weather data</span>
+            <span className="text-sm font-medium text-foreground">
+              Load {mode === "statistical" ? "Weather" : mode === "supply-demand" ? "Supply/Demand" : "Finance"} Sample
+            </span>
+            <span className="font-mono text-[10px] text-muted-foreground">730 days of synthetic data</span>
           </div>
         </button>
 

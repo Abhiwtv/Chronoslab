@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Literal
 
@@ -23,36 +23,36 @@ app.add_middleware(
 # ── Existing routes ──────────────────────────────────────────
 
 @app.post("/forecast/statistical")
-async def statistical(file: UploadFile = File(...)):
+async def statistical(file: UploadFile = File(...), column: str = Form(None)):
     try:
         contents = await file.read()
-        ts = process_csv(contents)
+        ts = process_csv(contents, column=column)
         return run_statistical_forecast(ts)
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/forecast/supply-demand")
-async def supply_demand(file: UploadFile = File(...)):
+async def supply_demand(file: UploadFile = File(...), column: str = Form(None)):
     try:
         contents = await file.read()
-        ts = process_csv(contents)
+        ts = process_csv(contents, column=column)
         return run_supply_demand(ts)
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/forecast/finance")
-async def finance(file: UploadFile = File(None)):
+async def finance(file: UploadFile = File(None), column: str = Form(None)):
     try:
         if file:
             contents = await file.read()
-            ts = process_csv(contents)
+            ts = process_csv(contents, column=column)
             return run_finance(ts)
         else:
             return run_finance()
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── Demo routes ──────────────────────────────────────────────

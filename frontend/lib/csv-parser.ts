@@ -304,7 +304,7 @@ function simpleForecast(
   }
 }
 
-export function parseCSV(csvText: string): ParsedData {
+export function parseCSV(csvText: string, targetColOverride?: string): ParsedData {
   const lines = csvText.trim().split("\n").filter(l => l.trim())
   if (lines.length < 3) throw new Error("CSV must have at least a header and 2 data rows")
 
@@ -345,7 +345,9 @@ export function parseCSV(csvText: string): ParsedData {
     return numCount / Math.min(rows.length, 100) > 0.5
   })
 
-  const targetCol = numericCols[0] || headers.find(h => h !== datetimeCol) || headers[1]
+  const targetCol = targetColOverride && numericCols.includes(targetColOverride) 
+    ? targetColOverride 
+    : (numericCols[0] || headers.find(h => h !== datetimeCol) || headers[1])
 
   // Build time series
   const timeSeries = rows
