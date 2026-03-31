@@ -72,13 +72,24 @@ export function Dashboard({ data, fileName, onReset, onColumnChange }: Dashboard
             icon={<Clock className="h-4 w-4" />}
             delay={150}
           />
-          <StatCard
-            label="sMAPE"
-            value={`${data.forecast.smape.toFixed(1)}%`}
-            sub={data.forecast.model}
-            accent
-            delay={200}
-          />
+          {/* Replace the existing sMAPE StatCard with this block */}
+          {data.forecast.vol_mae_bps ? (
+            <StatCard
+              label="Vol MAE (bps)"
+              value={data.forecast.vol_mae_bps.toFixed(2)}
+              sub={`±2σ Cov: ${data.forecast.cov_2sig?.toFixed(1)}%`}
+              accent
+              delay={200}
+            />
+          ) : (
+            <StatCard
+              label="sMAPE"
+              value={`${data.forecast.smape.toFixed(1)}%`}
+              sub={data.forecast.model}
+              accent
+              delay={200}
+            />
+          )}
           <StatCard
             label="Volatility"
             value={`${(data.stats.volatility * 100).toFixed(1)}%`}

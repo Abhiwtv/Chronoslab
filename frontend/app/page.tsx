@@ -13,7 +13,7 @@ export default function Home() {
   const [currentMode, setCurrentMode] = useState<string>("statistical")
   const [isClient, setIsClient] = useState(false);
 
-  const syncWithBackend = useCallback(async (csvText: string, name: string, mode: string, col: string, baseParsed: ParsedData) => {
+ const syncWithBackend = useCallback(async (csvText: string, name: string, mode: string, col: string, baseParsed: ParsedData) => {
     try {
       const formData = new FormData()
       const file = new File([csvText], name, { type: "text/csv" })
@@ -31,28 +31,54 @@ export default function Home() {
 
       const pythonResult = await response.json()
       
-      // Safety check in case FastAPI returned a dict with error via 200 somehow
       if (pythonResult.error || pythonResult.detail) {
         throw new Error(pythonResult.error || pythonResult.detail)
       }
 
-      console.log("✅ Python Logic Success:", pythonResult.sMAPE)
+      console.log(`✅ Python Logic Success (${mode}):`, pythonResult)
 
-      // OVERWRITE the local "dumb" forecast with the Python "smart" forecast
+      // 1. Dynamically map the correct keys based on the pipeline mode
+      let bestModel = "Unknown"
+      let finalSmape = baseParsed.forecast.smape
+      let backendPredictions: number[] | undefined = undefined
+      let financeMetrics: any = undefined
+
+      if (mode === "statistical") {
+        bestModel = pythonResult.best_model || "Statistical Pipeline"
+        finalSmape = typeof pythonResult.sMAPE === 'number' ? pythonResult.sMAPE : finalSmape
+        backendPredictions = pythonResult.predictions
+      } 
+      else if (mode === "supply-demand") {
+        bestModel = pythonResult.is_hybrid ? "ETS + Dual-Gated DL" : "ETS Baseline"
+        finalSmape = typeof pythonResult.final_mape === 'number' ? pythonResult.final_mape : finalSmape
+        backendPredictions = pythonResult.final
+      } 
+      else if (mode === "finance") {
+        bestModel = "GARCH + Dual-Gated DL"
+        backendPredictions = pythonResult.corrected_sigma_bps
+        financeMetrics = {
+          vol_mae_bps: pythonResult.metrics_post_dl?.vol_mae_bps,
+          cov_2sig: pythonResult.metrics_post_dl?.cov_2sig
+        }
+      }
+
+      // 2. Overwrite the frontend state
       const finalParsed: ParsedData = {
         ...baseParsed,
-        seasonal: pythonResult.is_seasonal,
-        seasonalStrength: pythonResult.seasonal_strength,
+        seasonal: pythonResult.is_seasonal ?? baseParsed.seasonal,
+        seasonalStrength: pythonResult.seasonal_strength ?? baseParsed.seasonalStrength,
         forecast: {
           ...baseParsed.forecast,
-          model: pythonResult.best_model || "Unknown",
-          smape: typeof pythonResult.sMAPE === 'number' ? pythonResult.sMAPE : baseParsed.forecast.smape,
-          mape: typeof pythonResult.MAPE === 'number' ? pythonResult.MAPE : baseParsed.forecast.mape,
+          model: bestModel,
+          smape: finalSmape,
+          mape: finalSmape,
           differencing: pythonResult.differencing || 0,
+          vol_mae_bps: financeMetrics?.vol_mae_bps,
+          cov_2sig: financeMetrics?.cov_2sig,
           test: baseParsed.forecast.test.map((item, index) => ({
             ...item,
-            predicted: pythonResult.predictions && pythonResult.predictions[index] !== undefined 
-              ? pythonResult.predictions[index] 
+            predicted: backendPredictions && backendPredictions[index] !== undefined 
+              ? backendPredictions[index] 
               : item.predicted
           }))
         }

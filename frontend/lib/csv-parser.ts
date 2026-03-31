@@ -38,7 +38,10 @@ export interface ParsedData {
     mape?: number            
     differencing: number
     seasonal_order?: number[] 
-    seasonal_differencing?: number //
+    seasonal_differencing?: number
+    // ADD THESE TWO LINES 👇
+    vol_mae_bps?: number;
+    cov_2sig?: number;
   }
 }
 
