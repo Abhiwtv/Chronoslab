@@ -26,20 +26,27 @@ def process_csv(file_bytes, column=None):
     if numeric_df.shape[1] == 0:
         raise ValueError("No numeric column found")
 
-    # NEW: column selection support
+    # Column selection support
     if column and column in numeric_df.columns:
         ts = numeric_df[column]
     else:
         ts = numeric_df.iloc[:, 0]
-    #This is force numeic
+        
+    # Force numeric
     ts = pd.to_numeric(ts, errors='coerce')
-    # ---------- CLEANING ----------
-    ts = ts.replace([np.inf, -np.inf], np.nan)
+    
+    # ---------- CLEANING & RESAMPLING ----------
     ts = ts.replace([np.inf, -np.inf], np.nan)
 
     if ts.isnull().all():
         raise ValueError("Column contains only invalid values")
 
+    # IMPORTANT FIX: Preserve DatetimeIndex and resample to hourly
+    # This ensures the 168-period ETS seasonality and DL time-features work correctly
+    if isinstance(ts.index, pd.DatetimeIndex):
+        ts = ts.resample('h').sum()
+
+    # Interpolate to fill any gaps created by resampling or missing data
     ts = ts.interpolate(method="linear").bfill().ffill()
 
     if len(ts) < 20:
@@ -48,6 +55,7 @@ def process_csv(file_bytes, column=None):
     if ts.std() == 0:
         raise ValueError("No variation in data")
 
-    ts.index = range(len(ts))
+    # REMOVED: ts.index = range(len(ts)) 
+    # (This line was previously destroying the timestamps needed by the models)
 
     return ts
