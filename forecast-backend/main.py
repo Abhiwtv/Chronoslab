@@ -41,19 +41,25 @@ async def supply_demand(file: UploadFile = File(...), column: str = Form(None)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 @app.post("/forecast/finance")
 async def finance(file: UploadFile = File(None), column: str = Form(None)):
     try:
         if file:
             contents = await file.read()
             ts = process_csv(contents, column=column)
-            return run_finance(ts)
+            return run_finance(ts=ts, test_hours=5, n_candles=6500)  # ← ts=ts, not None
         else:
             return run_finance()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": str(e),
+                "trace": traceback.format_exc()
+                   }
+        )
 
 # ── Demo routes ──────────────────────────────────────────────
 
@@ -109,6 +115,6 @@ async def finance_demo(
     ),
 ):
     try:
-        return run_finance(ts=None)
+        return run_finance(ts=None, test_hours=test_hours, n_candles=n_candles)  # ← pass them
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

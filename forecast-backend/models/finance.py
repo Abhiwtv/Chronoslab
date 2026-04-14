@@ -75,10 +75,9 @@ def compute_log_returns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _fit_ets(train: pd.Series, period: int = 24) -> ExponentialSmoothing:
     return ExponentialSmoothing(
-        train, trend="add", damped_trend=True,
+        train.values, trend="add", damped_trend=True,
         seasonal="add", seasonal_periods=period,
     ).fit(optimized=True)
-
 
 def get_ets_forecast(train: pd.Series, test: pd.Series,
                      period: int = 24) -> tuple[pd.Series, pd.Series]:
@@ -89,7 +88,7 @@ def get_ets_forecast(train: pd.Series, test: pd.Series,
     print(f"\n[ETS] Fitting on {len(train)} points | period={period}")
     model     = _fit_ets(train, period)
     forecast  = pd.Series(model.forecast(len(test)), index=test.index)
-    residuals = pd.Series(model.resid.values, index=train.index).fillna(0)
+    residuals = pd.Series(model.resid, index=train.index).fillna(0)
     print(f"[ETS] Residual std={residuals.std():.6f}")
     return forecast, residuals
 
@@ -424,7 +423,7 @@ def execute_lstm_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
     lstm.fit(
         [X_seq[:-vn], X_static[:-vn]], y_ms[:-vn],
         validation_data=([X_seq[-vn:], X_static[-vn:]], y_ms[-vn:]),
-        epochs=epochs, batch_size=32, verbose=0,
+        epochs=epochs, batch_size=32, verbose=1,
         callbacks=[
             EarlyStopping(monitor="val_loss", patience=12,
                           restore_best_weights=True, verbose=0),
@@ -621,23 +620,28 @@ def chronoslab_finance(ts: pd.Series | None = None,
 # PUBLIC WRAPPER  (called by FastAPI routes)
 # =============================================================
 
-def run_finance(ts: pd.Series | None = None) -> dict:
-    """
-    JSON-serialisable wrapper over chronoslab_finance.
-    Returns coverage metrics for both pre-DL and post-DL intervals,
-    the blend ratios per forecast hour, and the gate diagnostics.
-    FIXED vs generalized: generalized returned only blend_ratio + report,
-    omitting corrected_sigma, garch_sigma, and coverage metrics entirely.
-    """
-    r = chronoslab_finance(ts)
+def run_finance(ts: pd.Series | None = None,
+                test_hours: int = 5,         # ← add params
+                n_candles: int = 6500) -> dict:
+    r = chronoslab_finance(ts, test_hours=test_hours, n_candles=n_candles)
+    
+    def to_py(x):
+        """Convert numpy scalars to native Python types."""
+        if isinstance(x, dict):
+            return {k: to_py(v) for k, v in x.items()}
+        if isinstance(x, (np.floating, np.integer)):
+            return float(x)
+        return x
+
     return {
-        "timestamps":       [str(t) for t in r["actual"].index],
-        "garch_sigma_bps":  (r["garch_sigma"].values * 1e4).tolist(),
-        "corrected_sigma_bps": (r["corrected_sigma"].values * 1e4).tolist(),
-        "blend_ratio":      r["blend_ratio"].tolist(),
-        "metrics_pre_dl":   r["metrics_pre"],
-        "metrics_post_dl":  r["metrics_post"],
+        "timestamps":              [str(t) for t in r["actual"].index],
+        "garch_sigma_bps":         (r["garch_sigma"].values * 1e4).tolist(),
+        "corrected_sigma_bps":     (r["corrected_sigma"].values * 1e4).tolist(),
+        "blend_ratio":             r["blend_ratio"].values.tolist(),  # ← .values first!
+        "metrics_pre_dl":          to_py(r["metrics_pre"]),           # ← convert np types
+        "metrics_post_dl":         to_py(r["metrics_post"]),
         "vol_mae_improvement_bps": round(
-            r["metrics_pre"]["vol_mae_bps"] - r["metrics_post"]["vol_mae_bps"], 4),
-        "report":           r["report"],
+            float(r["metrics_pre"]["vol_mae_bps"]) - 
+            float(r["metrics_post"]["vol_mae_bps"]), 4),
+        "report": to_py(r["report"]),
     }
