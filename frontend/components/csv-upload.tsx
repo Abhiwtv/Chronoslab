@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 interface CSVUploadProps {
   onFileLoaded: (csvText: string, fileName: string, mode: "statistical" | "supply-demand" | "finance") => void
+  onDemoLoaded: (result: any, fileName: string, mode: "statistical" | "supply-demand" | "finance") => void
 }
 
 function FloatingParticle({ delay, x, duration }: { delay: number; x: number; duration: number }) {
@@ -45,7 +46,7 @@ function PipelineStep({ icon, label, active, done }: { icon: React.ReactNode; la
   )
 }
 
-export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
+export function CSVUpload({ onFileLoaded, onDemoLoaded }: CSVUploadProps) {
   const [mounted, setMounted] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
@@ -84,7 +85,7 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
       }
       reader.readAsText(file)
     },
-    [onFileLoaded]
+    [onFileLoaded, mode]
   )
 
   const handleDrop = useCallback(
@@ -97,66 +98,102 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
     [handleFile]
   )
 
-  const loadSampleData = useCallback(() => {
+  const loadSampleData = useCallback(async () => {
     setIsProcessing(true)
     setPipelineStep(0)
-    let headers = ""
-    const rows: string[] = []
-    const start = new Date("2021-01-01")
 
-    if (mode === "statistical") {
-      headers = "Date,Temperature,Humidity,Pressure\n"
-      let temp = 15, hum = 60, pres = 1013
-      for (let i = 0; i < 730; i++) {
-        const d = new Date(start.getTime() + i * 86400000)
-        temp += (Math.random() - 0.48) * 2 + Math.sin((i / 365) * Math.PI * 2) * 0.5
-        hum += (Math.random() - 0.5) * 3 + Math.cos((i / 365) * Math.PI * 2) * 0.3
-        pres += (Math.random() - 0.5) * 2
-        rows.push(`${d.toISOString().split("T")[0]},${temp.toFixed(1)},${Math.max(20, Math.min(95, hum)).toFixed(1)},${pres.toFixed(1)}`)
-      }
-    } else if (mode === "supply-demand") {
-      headers = "Date,Demand,Supply,Price\n"
-      let demand = 1000, supply = 1000, price = 50
-      for (let i = 0; i < 730; i++) {
-        const d = new Date(start.getTime() + i * 86400000)
-        demand += (Math.random() - 0.45) * 50 + Math.sin((i / 365) * Math.PI * 2) * 200
-        supply += (Math.random() - 0.5) * 40 + Math.cos((i / 365) * Math.PI * 2) * 100
-        price = 50 + (demand - supply) * 0.05
-        rows.push(`${d.toISOString().split("T")[0]},${Math.max(0, demand).toFixed(0)},${Math.max(0, supply).toFixed(0)},${Math.max(1, price).toFixed(2)}`)
-      }
-    } else if (mode === "finance") {
-      headers = "Date,Open,High,Low,Close,Volume\n"
-      let price = 150
-      for (let i = 0; i < 730; i++) {
-        const d = new Date(start.getTime() + i * 86400000)
-        if (d.getDay() === 0 || d.getDay() === 6) {
-          continue // skip weekends for realistic finance data dates
-        }
-        const open = price + (Math.random() - 0.5) * 2
-        const high = open + Math.random() * 3
-        const low = open - Math.random() * 3
-        const close = open + (Math.random() - 0.5) * 4
-        price = close
-        const volume = Math.floor(1000000 + Math.random() * 500000)
-        rows.push(`${d.toISOString().split("T")[0]},${open.toFixed(2)},${high.toFixed(2)},${low.toFixed(2)},${close.toFixed(2)},${volume}`)
-      }
-    }
-
-    const text = headers + rows.join("\n")
+    // kick off the animation independently
     let step = 0
     const advance = () => {
       if (step < 5) {
-        setPipelineStep(step)
+        setPipelineStep(step + 1)
         step++
         timerRef.current = setTimeout(advance, 500)
-      } else {
-        const fileName = mode === "statistical" ? "weather_sample.csv" : mode === "supply-demand" ? "supply_demand_sample.csv" : "finance_sample.csv"
-        onFileLoaded(text, fileName, mode)
-        setIsProcessing(false)
       }
     }
     timerRef.current = setTimeout(advance, 300)
-  }, [onFileLoaded, mode])
+
+    if (mode === "supply-demand") {
+      try {
+        const res = await fetch(
+          "http://127.0.0.1:8000/forecast/supply-demand/demo?scenario=mon_wed_72h"
+        )
+        if (!res.ok) throw new Error("Demo fetch failed")
+        const result = await res.json()
+        if (result.error || result.detail) throw new Error(result.error || result.detail)
+        onDemoLoaded(result, "nyc_taxi_demo", "supply-demand")
+      } catch (err) {
+        console.warn("Supply-demand demo failed, falling back to synthetic", err)
+        // fallback: generate synthetic and go through normal flow
+        const headers = "Date,Demand,Supply,Price\n"
+        const rows: string[] = []
+        const start = new Date("2021-01-01")
+        let demand = 1000, supply = 1000, price = 50
+        for (let i = 0; i < 730; i++) {
+          const d = new Date(start.getTime() + i * 86400000)
+          demand += (Math.random() - 0.45) * 50 + Math.sin((i / 365) * Math.PI * 2) * 200
+          supply += (Math.random() - 0.5) * 40 + Math.cos((i / 365) * Math.PI * 2) * 100
+          price = 50 + (demand - supply) * 0.05
+          rows.push(`${d.toISOString().split("T")[0]},${Math.max(0, demand).toFixed(0)},${Math.max(0, supply).toFixed(0)},${Math.max(1, price).toFixed(2)}`)
+        }
+        onFileLoaded(headers + rows.join("\n"), "supply_demand_sample.csv", "supply-demand")
+      }
+      setIsProcessing(false)
+      return
+    }
+
+    if (mode === "finance") {
+      try {
+        const res = await fetch(
+          "http://127.0.0.1:8000/forecast/finance/demo?test_hours=5&n_candles=6500"
+        )
+        if (!res.ok) throw new Error("Demo fetch failed")
+        const result = await res.json()
+        if (result.error || result.detail) throw new Error(result.error || result.detail)
+        onDemoLoaded(result, "btc_usdt_demo", "finance")
+      } catch (err) {
+        console.warn("Finance demo failed, falling back to synthetic", err)
+        const headers = "Date,Open,High,Low,Close,Volume\n"
+        const rows: string[] = []
+        const start = new Date("2021-01-01")
+        let price = 150
+        for (let i = 0; i < 730; i++) {
+          const d = new Date(start.getTime() + i * 86400000)
+          if (d.getDay() === 0 || d.getDay() === 6) continue
+          const open = price + (Math.random() - 0.5) * 2
+          const high = open + Math.random() * 3
+          const low = open - Math.random() * 3
+          const close = open + (Math.random() - 0.5) * 4
+          price = close
+          const volume = Math.floor(1000000 + Math.random() * 500000)
+          rows.push(`${d.toISOString().split("T")[0]},${open.toFixed(2)},${high.toFixed(2)},${low.toFixed(2)},${close.toFixed(2)},${volume}`)
+        }
+        onFileLoaded(headers + rows.join("\n"), "finance_sample.csv", "finance")
+      }
+      setIsProcessing(false)
+      return
+    }
+
+    // statistical — unchanged synthetic generation
+    const headers = "Date,Temperature,Humidity,Pressure\n"
+    const rows: string[] = []
+    const start = new Date("2021-01-01")
+    let temp = 15, hum = 60, pres = 1013
+    for (let i = 0; i < 730; i++) {
+      const d = new Date(start.getTime() + i * 86400000)
+      temp += (Math.random() - 0.48) * 2 + Math.sin((i / 365) * Math.PI * 2) * 0.5
+      hum += (Math.random() - 0.5) * 3 + Math.cos((i / 365) * Math.PI * 2) * 0.3
+      pres += (Math.random() - 0.5) * 2
+      rows.push(`${d.toISOString().split("T")[0]},${temp.toFixed(1)},${Math.max(20, Math.min(95, hum)).toFixed(1)},${pres.toFixed(1)}`)
+    }
+    const text = headers + rows.join("\n")
+    let s = 0
+    const adv = () => {
+      if (s < 5) { setPipelineStep(s); s++; timerRef.current = setTimeout(adv, 500) }
+      else { onFileLoaded(text, "weather_sample.csv", "statistical"); setIsProcessing(false) }
+    }
+    timerRef.current = setTimeout(adv, 300)
+  }, [onFileLoaded, onDemoLoaded, mode])
 
   const triggerFileInput = useCallback(() => {
     const input = document.createElement("input")
@@ -345,9 +382,13 @@ export function CSVUpload({ onFileLoaded }: CSVUploadProps) {
             <Database className="h-4 w-4 text-primary" />
           </div>
           <div className="flex flex-col items-start gap-0.5">
-            <span className="text-sm font-medium text-foreground">
-              Load {mode === "statistical" ? "Weather" : mode === "supply-demand" ? "Supply/Demand" : "Finance"} Sample
-            </span>
+           <span className="font-mono text-[10px] text-muted-foreground">
+            {mode === "supply-demand"
+              ? "NYC Taxi hourly live demo"
+              : mode === "finance"
+              ? "BTC/USDT live Binance demo"
+              : "730 days of synthetic data"}
+          </span>
             <span className="font-mono text-[10px] text-muted-foreground">730 days of synthetic data</span>
           </div>
         </button>

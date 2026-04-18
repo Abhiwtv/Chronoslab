@@ -2,6 +2,14 @@
 # models/finance.py
 # ChronosLab Finance — ETS → GARCH → Dual-Gated DL Vol Correction
 # Target: Vol-correction ratio  |  Option B (volatility intervals)
+#
+# FIXES vs original:
+#   1. test_hours default raised 5 → 24 (coverage metrics need n≥20)
+#   2. chronoslab_finance / run_finance default test_hours=24
+#   3. Pipeline prints a WARNING when test_hours < 20
+#   4. compute_coverage_metrics adds n_samples + reliability flags
+#   5. coverage_reliable flag gated on n≥20 in metrics dict
+#   6. StrictMode double-call guard via _running sentinel (backend)
 # =============================================================
 
 import warnings
@@ -25,6 +33,7 @@ from tensorflow.keras import regularizers
 
 import ccxt
 import time
+import threading
 
 tf.get_logger().setLevel("ERROR")
 
@@ -32,6 +41,16 @@ tf.get_logger().setLevel("ERROR")
 N_REGIME    = 7    # regime context features
 N_TIME      = 10   # time-of-day features
 EVAL_WINDOW = 400  # rolling evaluation window (origins)
+
+# FIX 6: guard against React StrictMode double-invoke in dev
+# If a request arrives while one is already running, the second is
+# dropped rather than running the full pipeline twice.
+_pipeline_lock = threading.Lock()
+_pipeline_running = False
+
+# Minimum test samples for coverage metrics to be statistically meaningful.
+# Below this threshold metrics are computed but flagged as unreliable.
+MIN_COVERAGE_SAMPLES = 20
 
 
 # =============================================================
@@ -57,7 +76,7 @@ def fetch_btc_ohlcv(symbol: str = "BTC/USDT", timeframe: str = "1h",
     df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.set_index("timestamp").sort_index()
-    df = df[~df.index.duplicated(keep="first")]   # deduplicate before tail
+    df = df[~df.index.duplicated(keep="first")]
     df = df.tail(n_candles)
     print(f"[DATA] Loaded {len(df)} rows | {df.index[0]} → {df.index[-1]}")
     return df
@@ -79,12 +98,9 @@ def _fit_ets(train: pd.Series, period: int = 24) -> ExponentialSmoothing:
         seasonal="add", seasonal_periods=period,
     ).fit(optimized=True)
 
+
 def get_ets_forecast(train: pd.Series, test: pd.Series,
                      period: int = 24) -> tuple[pd.Series, pd.Series]:
-    """
-    Fit ETS on train, return (forecast_series, residuals_series).
-    period=24 captures the 24H intraday seasonality in crypto returns.
-    """
     print(f"\n[ETS] Fitting on {len(train)} points | period={period}")
     model     = _fit_ets(train, period)
     forecast  = pd.Series(model.forecast(len(test)), index=test.index)
@@ -99,11 +115,6 @@ def get_ets_forecast(train: pd.Series, test: pd.Series,
 
 def fit_garch(residuals: pd.Series, p: int = 1, q: int = 1,
               dist: str = "studentst"):
-    """
-    Fit GARCH(p,q) on ETS residuals (scaled ×100 for numerical stability).
-    Student-t distribution handles fat tails in crypto returns.
-    Returns (garch_result, scaled_residuals).
-    """
     print(f"\n[GARCH] Fitting GARCH({p},{q}) | dist={dist} | n={len(residuals)}")
     scaled = residuals * 100
     am     = arch_model(scaled, vol="Garch", p=p, q=q, dist=dist, rescale=False)
@@ -115,14 +126,8 @@ def fit_garch(residuals: pd.Series, p: int = 1, q: int = 1,
 
 
 def get_garch_volatility(garch_result, horizon: int) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extract in-sample conditional vol (train) and multi-step forecast (test).
-    Both returned in original return scale (÷100 from the scaled fit).
-    """
-    # In-sample: divide by 100 to undo the ×100 scaling
     cond_vol_train = garch_result.conditional_volatility.values / 100
 
-    # Multi-step forecast via GARCH persistence equation
     last_var = float(garch_result.conditional_volatility.iloc[-1] ** 2)
     omega    = float(garch_result.params["omega"])
     alpha    = float(garch_result.params["alpha[1]"])
@@ -140,7 +145,6 @@ def get_garch_volatility(garch_result, horizon: int) -> tuple[np.ndarray, np.nda
 
 def compute_standardized_residuals(residuals: pd.Series,
                                    cond_vol_train: np.ndarray) -> pd.Series:
-    """z_t = ê_t / σ̂_t — for diagnostics only (not used as DL target)."""
     sigma = pd.Series(cond_vol_train, index=residuals.index).clip(lower=1e-8)
     z     = residuals / sigma
     print(f"\n[z_t] mean={z.mean():.4f} | std={z.std():.4f} | kurtosis={z.kurtosis():.4f}")
@@ -152,33 +156,24 @@ def compute_standardized_residuals(residuals: pd.Series,
 # =============================================================
 
 def get_time_features(index) -> np.ndarray:
-    """
-    10-column time-feature matrix.
-    FIXED: original had 10 features. Generalized version had only 6,
-    missing the 3 session flags and the weekend flag entirely.
-    """
     hour = np.array(index.hour, dtype=float)
     dow  = np.array(index.dayofweek, dtype=float)
     return np.column_stack([
-        np.sin(2 * np.pi * hour / 24),                          # hour cycle (sin)
-        np.cos(2 * np.pi * hour / 24),                          # hour cycle (cos)
-        np.sin(2 * np.pi * dow  / 7),                           # week cycle (sin)
-        np.cos(2 * np.pi * dow  / 7),                           # week cycle (cos)
-        ((hour >= 8)  & (hour <= 10)).astype(float),             # Asia open
-        ((hour >= 14) & (hour <= 16)).astype(float),             # EU/US overlap
-        ((hour >= 20) & (hour <= 23)).astype(float),             # US close
-        (dow >= 5).astype(float),                                # weekend flag
-        hour / 23.0,                                             # normalised hour
-        dow  / 6.0,                                              # normalised dow
+        np.sin(2 * np.pi * hour / 24),
+        np.cos(2 * np.pi * hour / 24),
+        np.sin(2 * np.pi * dow  / 7),
+        np.cos(2 * np.pi * dow  / 7),
+        ((hour >= 8)  & (hour <= 10)).astype(float),
+        ((hour >= 14) & (hour <= 16)).astype(float),
+        ((hour >= 20) & (hour <= 23)).astype(float),
+        (dow >= 5).astype(float),
+        hour / 23.0,
+        dow  / 6.0,
     ])
 
 
 def build_regime_features(returns_arr: np.ndarray,
                            garch_vol_arr: np.ndarray) -> np.ndarray:
-    """
-    7 backward-looking regime context features.
-    All computed from past values only — no leakage.
-    """
     ret = pd.Series(returns_arr)
     vol = pd.Series(garch_vol_arr)
 
@@ -199,7 +194,6 @@ def build_regime_features(returns_arr: np.ndarray,
 
 
 def compute_vol_ratios(res_raw: np.ndarray, cond_vol: np.ndarray) -> np.ndarray:
-    """vol_ratio_t = |ê_t| / σ̂_t, clipped to [0.01, 20]."""
     return np.clip(np.abs(res_raw) / np.clip(cond_vol, 1e-8, None), 0.01, 20.0)
 
 
@@ -208,10 +202,6 @@ def compute_vol_ratios(res_raw: np.ndarray, cond_vol: np.ndarray) -> np.ndarray:
 # =============================================================
 
 def check_alpha_breakout(vol_ratios: np.ndarray, alpha_thresh: float = 0.10) -> bool:
-    """
-    Gate 1: std(vol_ratio) > threshold → DL phase activates.
-    FIXED: generalized had no prints and used param name 'threshold'.
-    """
     ratio_std  = float(np.std(vol_ratios))
     ratio_mean = float(np.mean(vol_ratios))
     print(f"\n[ALPHA GATE] Vol-ratio mean={ratio_mean:.4f}  std={ratio_std:.4f}"
@@ -223,11 +213,6 @@ def check_alpha_breakout(vol_ratios: np.ndarray, alpha_thresh: float = 0.10) -> 
 
 def gated_alpha(val_preds: np.ndarray, val_actual: np.ndarray,
                 base_alpha: float = 0.40, min_corr: float = 0.03) -> tuple[float, float]:
-    """
-    Gate 2: corr(val_preds, val_actual) drives the blending weight.
-    FIXED: generalized used base_alpha=0.5, lacked min_corr param,
-           and used min() instead of np.clip for the alpha bound.
-    """
     n = min(len(val_preds), len(val_actual))
     if n < 3:
         return 0.0, 0.0
@@ -246,19 +231,6 @@ def execute_gbr_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
                            cond_vol_train: np.ndarray, garch_vol_test: np.ndarray,
                            horizon: int, test_index,
                            window_size: int = 24) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Train H GBR models (one per forecast step) on vol ratios.
-    Uses full feature set: lagged ratios + lag stats + GARCH vol +
-    7 regime features + 10 time features.
-
-    FIXED vs generalized:
-    - Restored RobustScaler on inputs
-    - Restored regime + time features (generalized had only raw lagged ratios)
-    - Restored H separate models (generalized had one model)
-    - n_estimators=300 restored (generalized had 200)
-    - Restored rolling walk-forward eval with valid_idxs alignment fix
-    - Returns (test_preds, val_preds, val_actual) — generalized returned only preds
-    """
     print(f"\n   --- GBR VOL CORRECTOR (target=vol_ratio, H={horizon}) ---")
     full_idx    = ets_residuals.index.append(test_index)
     tf_arr      = get_time_features(full_idx)
@@ -277,7 +249,6 @@ def execute_gbr_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
     if train_end < window_size + horizon:
         train_end = len(ratio_arr) - horizon - 10
 
-    # Build X and y in one loop to avoid index misalignment
     X_list, ys, valid_idxs = [], [[] for _ in range(horizon)], []
     for i in range(window_size, len(ratio_arr)):
         if i + horizon >= len(ratio_train):
@@ -307,7 +278,6 @@ def execute_gbr_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
         gbr_models.append(gbr)
     print(f"       GBR trained {horizon} models on {X_tr.shape[0]} sequences.")
 
-    # Rolling walk-forward evaluation
     eval_end  = min(train_end + EVAL_WINDOW, len(ratio_arr) - horizon)
     eval_mask = (valid_idxs >= train_end) & (valid_idxs < eval_end)
     X_eval    = X_all[eval_mask]
@@ -325,7 +295,6 @@ def execute_gbr_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
     corr_val   = float(np.corrcoef(val_actual, val_preds)[0, 1]) if len(val_preds) > 2 else 0.0
     print(f"       GBR rolling vol-ratio corr: {corr_val:.4f}  (n={len(val_preds)})")
 
-    # Live test prediction using last available window
     test_row    = X_all[-1]
     test_ratios = np.array([gbr_models[k].predict([test_row])[0] for k in range(horizon)])
     return test_ratios, val_preds, val_actual
@@ -336,16 +305,6 @@ def execute_gbr_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
 # =============================================================
 
 def _build_bilstm_vol(window_size: int, n_static: int, horizon: int) -> Model:
-    """
-    Two-stream BiLSTM with softplus output.
-
-    FIXED vs generalized:
-    - Restored BiLSTM (generalized had plain LSTM(32))
-    - Restored L2 regularization on both LSTM layers
-    - Restored two-stream architecture (seq + static)
-    - Restored Dense(horizon, softplus) output (generalized had Dense(1) linear)
-    - Epoch count and callbacks restored separately in execute_lstm_corrector
-    """
     seq_in = Input(shape=(window_size, 2), name="seq")
     x = Bidirectional(LSTM(64, activation="tanh", return_sequences=True,
                            kernel_regularizer=regularizers.l2(0.005)))(seq_in)
@@ -361,7 +320,7 @@ def _build_bilstm_vol(window_size: int, n_static: int, horizon: int) -> Model:
     m   = Concatenate()([x, s])
     m   = Dense(64, activation="relu")(m)
     m   = Dropout(0.1)(m)
-    out = Dense(horizon, activation="softplus")(m)  # positive ratios only
+    out = Dense(horizon, activation="softplus")(m)
 
     model = Model([seq_in, static_in], out)
     model.compile(optimizer=Adam(0.001), loss="huber")
@@ -373,16 +332,6 @@ def execute_lstm_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
                             horizon: int, test_index,
                             window_size: int = 24,
                             epochs: int = 100) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Train BiLSTM on vol ratios with rolling walk-forward eval.
-
-    FIXED vs generalized:
-    - epochs=100 restored (generalized had epochs=5)
-    - EarlyStopping + ReduceLROnPlateau restored (generalized had none)
-    - Regime features + static stream restored (generalized had no regime features)
-    - Rolling eval restored (generalized had none)
-    - Returns (test_preds, val_preds, val_actual)
-    """
     print(f"\n   --- BiLSTM VOL CORRECTOR (target=vol_ratio, H={horizon}) ---")
     full_idx    = ets_residuals.index.append(test_index)
     tf_arr      = get_time_features(full_idx)
@@ -432,7 +381,6 @@ def execute_lstm_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
         ],
     )
 
-    # Rolling walk-forward evaluation
     all_val_preds, all_val_actual = [], []
     eval_end = min(train_end + EVAL_WINDOW, len(ratio_arr) - horizon)
     for i in range(train_end, eval_end):
@@ -451,7 +399,6 @@ def execute_lstm_corrector(ets_residuals: pd.Series, returns_train: np.ndarray,
     corr_val   = float(np.corrcoef(val_actual, val_preds)[0, 1]) if len(val_preds) > 2 else 0.0
     print(f"       BiLSTM rolling vol-ratio corr: {corr_val:.4f}  (n={len(val_preds)})")
 
-    # Live test
     seq    = np.column_stack([ratio_arr[-window_size:],
                                vol_arr[-window_size:]]).reshape(1, window_size, 2)
     static = np.concatenate([regime_arr[-1], tf_arr[len(ets_residuals)]]).reshape(1, -1)
@@ -466,13 +413,6 @@ def reconstruct_vol(garch_vol_test: np.ndarray, test_index,
                     alpha_gbr: float, alpha_lstm: float,
                     gbr_ratios: np.ndarray,
                     lstm_ratios: np.ndarray) -> tuple[pd.Series, pd.Series]:
-    """
-    Blend GARCH baseline with DL vol correction.
-    When both models are blocked (alphas=0) the blend_ratio=1
-    and corrected_sigma = garch_sigma exactly.
-    FIXED vs generalized: generalized used a manual expression that
-    was structurally equivalent but lacked the safety clip [0.1, 5.0].
-    """
     alpha_total = alpha_gbr + alpha_lstm
     if alpha_total > 0:
         blend_ratio = ((1 - alpha_total) * np.ones(len(garch_vol_test))
@@ -493,24 +433,40 @@ def reconstruct_vol(garch_vol_test: np.ndarray, test_index,
 
 def compute_coverage_metrics(actual_returns, ets_forecast,
                               sigma_series, label: str = "") -> dict:
+    """
+    FIX: added n_samples and coverage_reliable flag.
+
+    coverage_reliable=False when n < MIN_COVERAGE_SAMPLES (20).
+    With n=5, P(100% cov_2sig | true=95%) = 79% — the metric is
+    essentially random noise. Flag it so the frontend can warn the user
+    rather than display a misleading "100% coverage" badge.
+    """
     actual  = np.array(actual_returns)
     center  = np.array(ets_forecast)
     sigma   = np.array(sigma_series)
     abs_err = np.abs(actual - center)
+    n       = len(actual)
 
-    cov_1  = np.mean(abs_err <= sigma)     * 100
-    cov_2  = np.mean(abs_err <= 2 * sigma) * 100
+    cov_1   = np.mean(abs_err <= sigma)     * 100
+    cov_2   = np.mean(abs_err <= 2 * sigma) * 100
     vol_mae = np.mean(np.abs(sigma - abs_err)) * 1e4
 
+    reliable = n >= MIN_COVERAGE_SAMPLES
+    if not reliable:
+        print(f"  [METRICS/{label}] ⚠ n={n} < {MIN_COVERAGE_SAMPLES} — "
+              f"coverage stats unreliable (need test_hours≥{MIN_COVERAGE_SAMPLES})")
+
     return {
-        "label":       label,
-        "cov_1sig":    cov_1,
-        "cov_2sig":    cov_2,
-        "width_1sig":  np.mean(2 * sigma) * 1e4,
-        "width_2sig":  np.mean(4 * sigma) * 1e4,
-        "vol_mae_bps": vol_mae,
-        "calib_err_1": abs(cov_1 - 68.27),
-        "calib_err_2": abs(cov_2 - 95.45),
+        "label":            label,
+        "n_samples":        n,
+        "coverage_reliable": reliable,
+        "cov_1sig":         cov_1,
+        "cov_2sig":         cov_2,
+        "width_1sig":       np.mean(2 * sigma) * 1e4,
+        "width_2sig":       np.mean(4 * sigma) * 1e4,
+        "vol_mae_bps":      vol_mae,
+        "calib_err_1":      abs(cov_1 - 68.27),
+        "calib_err_2":      abs(cov_2 - 95.45),
     }
 
 
@@ -519,15 +475,53 @@ def compute_coverage_metrics(actual_returns, ets_forecast,
 # =============================================================
 
 def chronoslab_finance(ts: pd.Series | None = None,
-                       test_hours: int = 5,
+                       test_hours: int = 24,
                        n_candles: int = 6500) -> dict:
     """
     Full Option B pipeline: ETS → GARCH → Dual-Gated DL vol correction.
 
-    If ts is None, BTC/USDT data is fetched from Binance.
-    If ts is provided it must be a pd.Series of prices (not returns);
-    log returns are computed internally.
+    FIX: test_hours default raised from 5 → 24.
+    With test_hours=5 coverage metrics had P(100% | true=95%) = 79%,
+    making them statistically meaningless. At test_hours=24 that drops
+    to 29%, and at test_hours=48 to 8.6% — genuinely informative.
+
+    Recommended values:
+      test_hours=24   minimum for any meaningful coverage stat
+      test_hours=48   good calibration check
+      test_hours=168  robust 1-week evaluation
     """
+    global _pipeline_running
+
+    # FIX: double-call guard — React StrictMode fires callbacks twice in dev,
+    # sending two POST requests. The second arrives while the first is still
+    # running the BiLSTM. We detect this and return a 503-style error so the
+    # frontend gets one clean response instead of two concurrent pipelines.
+    with _pipeline_lock:
+        if _pipeline_running:
+            raise RuntimeError(
+                "Pipeline already running — duplicate request detected "
+                "(React StrictMode double-invoke). Retry in a moment."
+            )
+        _pipeline_running = True
+
+    try:
+        return _run_pipeline(ts, test_hours, n_candles)
+    finally:
+        with _pipeline_lock:
+            _pipeline_running = False
+
+
+def _run_pipeline(ts: pd.Series | None,
+                  test_hours: int,
+                  n_candles: int) -> dict:
+    """Inner pipeline — called by chronoslab_finance after lock is acquired."""
+
+    # FIX: warn when test_hours is too small for reliable coverage metrics
+    if test_hours < MIN_COVERAGE_SAMPLES:
+        print(f"\n  ⚠  WARNING: test_hours={test_hours} < {MIN_COVERAGE_SAMPLES}.")
+        print(f"     Coverage metrics (cov_1sig, cov_2sig) will be flagged as")
+        print(f"     unreliable. Use test_hours≥{MIN_COVERAGE_SAMPLES} for meaningful evaluation.")
+
     if ts is None:
         df      = fetch_btc_ohlcv(n_candles=n_candles)
         df      = compute_log_returns(df)
@@ -545,7 +539,7 @@ def chronoslab_finance(ts: pd.Series | None = None,
 
     print(f"\n{'='*60}")
     print(f"  ChronosLab Finance | horizon={horizon}H | train={len(train_r)}")
-    print(f"  EVAL_WINDOW={EVAL_WINDOW}")
+    print(f"  EVAL_WINDOW={EVAL_WINDOW} | coverage_reliable={horizon >= MIN_COVERAGE_SAMPLES}")
     print(f"{'='*60}")
 
     # Stage 1: ETS
@@ -553,11 +547,10 @@ def chronoslab_finance(ts: pd.Series | None = None,
 
     # Stage 2: GARCH
     garch_result, _ = fit_garch(ets_residuals)
-    # FIXED: get_garch_volatility signature — pass only (garch_result, horizon)
     cond_vol_train, garch_vol_test = get_garch_volatility(garch_result, horizon)
     z_t = compute_standardized_residuals(ets_residuals, cond_vol_train)
 
-    # Stage 3: Vol ratios + gate
+    # Stage 3: Vol ratios + dual gate
     vol_ratios_train = compute_vol_ratios(ets_residuals.values, cond_vol_train)
     garch_sigma_test = pd.Series(garch_vol_test, index=test_r.index)
 
@@ -576,7 +569,6 @@ def chronoslab_finance(ts: pd.Series | None = None,
             ets_residuals, train_r.values, cond_vol_train,
             garch_vol_test, horizon, test_r.index)
 
-        # Gate 2 on rolling eval arrays — not on ratios[-n:] which was the bug
         gbr_alpha,  gbr_c  = gated_alpha(gbr_vp,  gbr_va,  base_alpha=0.60)
         lstm_alpha, lstm_c = gated_alpha(lstm_vp, lstm_va, base_alpha=0.80)
 
@@ -601,15 +593,18 @@ def chronoslab_finance(ts: pd.Series | None = None,
 
     print(f"\n{'='*60}")
     print(f"  VOL MAE  pre={m_pre['vol_mae_bps']:.2f} bps → post={m_post['vol_mae_bps']:.2f} bps")
-    print(f"  ±2σ cov  pre={m_pre['cov_2sig']:.1f}%    → post={m_post['cov_2sig']:.1f}%")
+    print(f"  ±2σ cov  pre={m_pre['cov_2sig']:.1f}%    → post={m_post['cov_2sig']:.1f}%"
+          + ("  ⚠ unreliable (n<20)" if not m_post["coverage_reliable"] else ""))
     print(f"{'='*60}\n")
 
     return dict(
         actual=test_r,
+        train_r=train_r,
         ets_forecast=ets_forecast,
         garch_sigma=garch_sigma_test,
         corrected_sigma=corrected_sigma,
         blend_ratio=blend_ratio,
+        cond_vol_train=cond_vol_train,   # in-sample GARCH vol — needed by frontend
         metrics_pre=m_pre,
         metrics_post=m_post,
         report=report,
@@ -621,27 +616,45 @@ def chronoslab_finance(ts: pd.Series | None = None,
 # =============================================================
 
 def run_finance(ts: pd.Series | None = None,
-                test_hours: int = 5,         # ← add params
+                test_hours: int = 24,
                 n_candles: int = 6500) -> dict:
+    """
+    FIX: test_hours default raised 5 → 24 here and in chronoslab_finance.
+    """
     r = chronoslab_finance(ts, test_hours=test_hours, n_candles=n_candles)
-    
+
     def to_py(x):
-        """Convert numpy scalars to native Python types."""
+        """Convert numpy scalars to native Python types for JSON serialization."""
         if isinstance(x, dict):
             return {k: to_py(v) for k, v in x.items()}
         if isinstance(x, (np.floating, np.integer)):
             return float(x)
+        if isinstance(x, bool):
+            return bool(x)
         return x
+
+    # In-sample GARCH vol — used by frontend for timeSeries + stats
+    cond_vol_bps = r["cond_vol_train"] * 1e4
+    train_index  = r["train_r"].index
 
     return {
         "timestamps":              [str(t) for t in r["actual"].index],
+        "train_timestamps":        [str(t) for t in train_index],
         "garch_sigma_bps":         (r["garch_sigma"].values * 1e4).tolist(),
         "corrected_sigma_bps":     (r["corrected_sigma"].values * 1e4).tolist(),
-        "blend_ratio":             r["blend_ratio"].values.tolist(),  # ← .values first!
-        "metrics_pre_dl":          to_py(r["metrics_pre"]),           # ← convert np types
+        "cond_vol_train_bps":      cond_vol_bps.tolist(),
+        "blend_ratio":             r["blend_ratio"].values.tolist(),
+        "series_stats": {
+            "count": int(len(cond_vol_bps) + len(r["actual"])),
+            "mean":  float(np.mean(cond_vol_bps)),
+            "std":   float(np.std(cond_vol_bps)),
+            "min":   float(np.min(cond_vol_bps)),
+            "max":   float(np.max(cond_vol_bps)),
+        },
+        "metrics_pre_dl":          to_py(r["metrics_pre"]),
         "metrics_post_dl":         to_py(r["metrics_post"]),
         "vol_mae_improvement_bps": round(
-            float(r["metrics_pre"]["vol_mae_bps"]) - 
+            float(r["metrics_pre"]["vol_mae_bps"]) -
             float(r["metrics_post"]["vol_mae_bps"]), 4),
         "report": to_py(r["report"]),
     }

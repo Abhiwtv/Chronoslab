@@ -15,13 +15,13 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.ensemble import GradientBoostingRegressor
 
 import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
+from keras.models import Model
+from keras.layers import (
     LSTM, Dense, Dropout, Input, Concatenate, Bidirectional,
 )
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras import regularizers
+from keras.optimizers import Adam
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from keras import regularizers
 
 tf.get_logger().setLevel("ERROR")
 
@@ -36,7 +36,7 @@ _NYC_URL = (
 # Three pre-defined slices used by the demo route
 NYC_SCENARIOS = {
     "weekday_24h": ("2014-11-18 23:00:00", 24),   # Tuesday
-    "weekend_24h": ("2014-11-22 23:00:00", 24),   # Saturday
+    "weekend_24h": ("2014-11-22 23:00:00", 24),   # Saturdaya
     "mon_wed_72h": ("2014-11-19 23:00:00", 72),   # Mon-Wed
 }
 
@@ -66,6 +66,7 @@ def _detect_frequency(ts: pd.Series) -> int:
     Daily  data → 7
     Monthly    → 12
     """
+    print("Detecting frequency")
     if hasattr(ts.index, "freq") and ts.index.freq is not None:
         freq = str(ts.index.freq)
         if "H" in freq or "h" in freq:
@@ -89,6 +90,7 @@ def _winsorize(ts: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd.Se
 
 def _time_features(index) -> np.ndarray:
     """Build (N, 10) time-feature matrix from DatetimeIndex or integer index."""
+    
     if hasattr(index, "hour"):
         hour = np.array(index.hour, dtype=float)
         dow  = np.array(index.dayofweek, dtype=float)
@@ -144,13 +146,15 @@ def _get_ets_forecast(
 # MODULE 2 — DUAL GATE
 # =============================================================
 
-def _check_alpha_breakout(residuals: pd.Series, thresh: float = 0.01) -> bool:
-    var = float(np.var(residuals))
-    print(f"   [GATE 1] Variance={var:.6f} (threshold={thresh})")
+def _check_alpha_breakout(residuals: pd.Series, thresh_ratio: float = 0.05) -> bool:
+    print("Checking gate 1")
+    var    = float(np.var(residuals))
+    signal = float(np.var(residuals.cumsum()))
+    thresh = thresh_ratio * max(signal, 1e-4)
+    print(f"   [GATE 1] Variance={var:.6f} | AdaptiveThresh={thresh:.6f}")
     triggered = var > thresh
     print(f"   [GATE 1] >>> {'TRIGGERED ✓' if triggered else 'NOT triggered — ETS sufficient'}")
     return triggered
-
 
 def _gated_alpha(
     corrections: np.ndarray,
@@ -158,6 +162,7 @@ def _gated_alpha(
     base_alpha: float = 0.40,
     min_corr: float = 0.05,
 ) -> tuple[float, float]:
+    print("gate 2")
     n    = min(len(residuals), len(corrections))
     corr = np.corrcoef(np.array(residuals)[-n:], corrections[-n:])[0, 1]
     if np.isnan(corr) or corr <= min_corr:

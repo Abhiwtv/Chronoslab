@@ -42,6 +42,7 @@ export interface ParsedData {
     // ADD THESE TWO LINES 👇
     vol_mae_bps?: number;
     cov_2sig?: number;
+    coverage_reliable?: boolean;
   }
 }
 
