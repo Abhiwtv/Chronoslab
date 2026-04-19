@@ -145,7 +145,7 @@ export function CSVUpload({ onFileLoaded, onDemoLoaded }: CSVUploadProps) {
     if (mode === "finance") {
       try {
         const res = await fetch(
-          "http://127.0.0.1:8000/forecast/finance/demo?test_hours=5&n_candles=6500"
+          "http://127.0.0.1:8000/forecast/finance/demo?n_candles=6500"
         )
         if (!res.ok) throw new Error("Demo fetch failed")
         const result = await res.json()

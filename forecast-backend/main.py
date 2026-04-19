@@ -41,13 +41,14 @@ async def supply_demand(file: UploadFile = File(...), column: str = Form(None)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @app.post("/forecast/finance")
 async def finance(file: UploadFile = File(None), column: str = Form(None)):
     try:
         if file:
             contents = await file.read()
             ts = process_csv(contents, column=column)
-            return run_finance(ts=ts, test_hours=5, n_candles=6500)  # ← ts=ts, not None
+            return run_finance(ts=ts, test_hours=24, n_candles=6500)  # ← was 5
         else:
             return run_finance()
     except Exception as e:
@@ -58,8 +59,9 @@ async def finance(file: UploadFile = File(None), column: str = Form(None)):
             detail={
                 "error": str(e),
                 "trace": traceback.format_exc()
-                   }
+            }
         )
+
 
 # ── Demo routes ──────────────────────────────────────────────
 
@@ -102,10 +104,10 @@ async def supply_demand_demo(
 )
 async def finance_demo(
     test_hours: int = Query(
-        default=5,
+        default=24,   # ← was 5. Minimum for meaningful coverage metrics.
         ge=1,
-        le=24,
-        description="Number of hours to hold out as the test set (1-24).",
+        le=168,       # ← was 24. Raised to allow up to 1-week evaluation.
+        description="Number of hours to hold out as the test set (1–168).",
     ),
     n_candles: int = Query(
         default=6500,
@@ -115,6 +117,6 @@ async def finance_demo(
     ),
 ):
     try:
-        return run_finance(ts=None, test_hours=test_hours, n_candles=n_candles)  # ← pass them
+        return run_finance(ts=None, test_hours=test_hours, n_candles=n_candles)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

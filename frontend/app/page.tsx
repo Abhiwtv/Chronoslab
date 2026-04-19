@@ -135,24 +135,65 @@ export default function Home() {
     setError(null)
 
     if (mode === "supply-demand") {
-      const testData = (result.timestamps as string[]).map((t, i) => ({
-        date: t,
-        actual: result.actual[i],
-        predicted: result.final[i],
+      const timestamps = result.timestamps as string[]
+      const actualValues = result.actual as number[]
+      const predictedValues = result.final as number[]
+      
+      // 1. Build the time series
+      const timeSeries = timestamps.map((t: string, i: number) => ({
+        date: t, 
+        value: actualValues[i], 
+        timestamp: new Date(t).getTime(),
       }))
+
+      // 2. FIX: Populate rows for the Data Preview
+      const rows = timeSeries.map(item => ({
+        timestamp: item.date,
+        value: item.value
+      }))
+
+      // 3. FIX: Calculate stats dynamically instead of hardcoding 0
+      const values = actualValues.filter(v => typeof v === 'number' && !isNaN(v))
+      const count = values.length
+      const sum = values.reduce((a, b) => a + b, 0)
+      const mean = count > 0 ? sum / count : 0
+      
+      const variance = count > 0 ? values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / count : 0
+      const std = Math.sqrt(variance)
+      
+      const sorted = [...values].sort((a, b) => a - b)
+      const min = sorted[0] ?? 0
+      const max = sorted[sorted.length - 1] ?? 0
+      const median = count > 0 ? sorted[Math.floor(count / 2)] : 0
+      const q1 = count > 0 ? sorted[Math.floor(count * 0.25)] : 0
+      const q3 = count > 0 ? sorted[Math.floor(count * 0.75)] : 0
+
+      const testData = timestamps.map((t, i) => ({
+        date: t,
+        actual: actualValues[i] ?? 0,
+        predicted: predictedValues[i] ?? 0,
+      }))
+
       const parsed: ParsedData = {
         headers: ["timestamp", "value"],
-        rows: [],
+        rows: rows, // <--- Data preview will now populate
         datetimeCol: "timestamp",
         targetCol: "value",
         numericCols: ["value"],
-        timeSeries: (result.timestamps as string[]).map((t: string, i: number) => ({
-          date: t, value: result.actual[i], timestamp: new Date(t).getTime(),
-        })),
+        timeSeries: timeSeries,
         stats: {
-          count: result.actual.length, mean: 0, std: 0, min: 0, max: 0,
-          median: 0, q1: 0, q3: 0, skewness: 0, trend: "stationary",
-          volatility: 0, missingPercent: 0,
+          count: count, 
+          mean: mean, 
+          std: std, 
+          min: min, 
+          max: max,
+          median: median, 
+          q1: q1, 
+          q3: q3, 
+          skewness: 0, 
+          trend: "stationary",
+          volatility: std, 
+          missingPercent: 0,
         },
         frequency: "Hourly",
         seasonal: true,
@@ -161,7 +202,8 @@ export default function Home() {
         stationarity: { adfStat: 0, pValue: 0.05, isStationary: true },
         decomposition: { trend: [], seasonal: [], residual: [] },
         forecast: {
-          train: [], future: [],
+          train: [], 
+          future: [],
           model: result.is_hybrid ? "ETS + Dual-Gated DL" : "ETS Baseline",
           smape: result.final_mape,
           mape: result.final_mape,
@@ -173,85 +215,100 @@ export default function Home() {
     // Replace the finance branch in handleDemoLoaded with this:
 
 } else if (mode === "finance") {
-  // result now includes: cond_vol_train_bps, train_timestamps, series_stats
-  const trainVols: number[]     = result.cond_vol_train_bps ?? []
-  const trainTs: string[]       = result.train_timestamps   ?? []
-  const testVols: number[]      = result.corrected_sigma_bps ?? []
-  const garchVols: number[]     = result.garch_sigma_bps    ?? []
-  const n                        = testVols.length
+      const trainVols: number[]     = result.cond_vol_train_bps ?? []
+      const trainTs: string[]       = result.train_timestamps   ?? []
+      const testVols: number[]      = result.corrected_sigma_bps ?? []
+      const garchVols: number[]     = result.garch_sigma_bps    ?? []
+      const n                        = testVols.length
 
-  // Full time series = in-sample GARCH vol + test corrected vol
-  const fullTimeSeries = [
-    ...trainTs.map((t: string, i: number) => ({
-      date: t,
-      value: trainVols[i],
-      timestamp: new Date(t).getTime(),
-    })),
-    ...(result.timestamps as string[]).map((t: string, i: number) => ({
-      date: t,
-      value: testVols[i],
-      timestamp: new Date(t).getTime(),
-    })),
-  ]
+      // 1. Combine into full time series
+      const fullTimeSeries = [
+        ...trainTs.map((t: string, i: number) => ({
+          date: t,
+          value: trainVols[i],
+          timestamp: new Date(t).getTime(),
+        })),
+        ...(result.timestamps as string[]).map((t: string, i: number) => ({
+          date: t,
+          value: testVols[i],
+          timestamp: new Date(t).getTime(),
+        })),
+      ]
 
-  // Test panel: garch baseline as "actual", DL-corrected as "predicted"
-  const testData = Array.from({ length: n }, (_, i) => ({
-    date: (result.timestamps as string[])[i],
-    actual:    garchVols[i]  ?? 0,
-    predicted: testVols[i]   ?? 0,
-  }))
+      // 2. FIX: Populate rows so the Data Preview table actually renders
+      const rows = fullTimeSeries.map(item => ({
+        timestamp: item.date,
+        sigma_bps: item.value
+      }))
 
-  // Stats from the full in-sample series (not hardcoded 0)
-  const stats = result.series_stats ?? {
-    count: trainVols.length + n,
-    mean: 0, std: 0, min: 0, max: 0,
-  }
+      // 3. FIX: Calculate stats dynamically to prevent 0s if backend stats are missing
+      const values = fullTimeSeries.map(d => d.value).filter(v => typeof v === 'number' && !isNaN(v))
+      const count = values.length
+      const sum = values.reduce((a, b) => a + b, 0)
+      const mean = count > 0 ? sum / count : 0
+      
+      const variance = count > 0 ? values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / count : 0
+      const std = Math.sqrt(variance)
+      
+      const sorted = [...values].sort((a, b) => a - b)
+      const min = sorted[0] ?? 0
+      const max = sorted[sorted.length - 1] ?? 0
+      const median = count > 0 ? sorted[Math.floor(count / 2)] : 0
+      const q1 = count > 0 ? sorted[Math.floor(count * 0.25)] : 0
+      const q3 = count > 0 ? sorted[Math.floor(count * 0.75)] : 0
 
-  const parsed: ParsedData = {
-    headers: ["timestamp", "sigma_bps"],
-    rows: [],
-    datetimeCol: "timestamp",
-    targetCol: "sigma_bps",
-    numericCols: ["sigma_bps"],
-    timeSeries: fullTimeSeries,
-    stats: {
-      count:          stats.count,
-      mean:           stats.mean,
-      std:            stats.std,
-      min:            stats.min,
-      max:            stats.max,
-      median:         0,
-      q1:             0,
-      q3:             0,
-      skewness:       0,
-      trend:          "stationary",
-      volatility:     stats.std,
-      missingPercent: 0,
-    },
-    frequency: "Hourly",
-    seasonal: false,
-    seasonalStrength: 0,
-    period: null,
-    stationarity: { adfStat: 0, pValue: 0.05, isStationary: true },
-    decomposition: { trend: [], seasonal: [], residual: [] },
-    forecast: {
-      train: trainVols.map((v: number, i: number) => ({
-        date: trainTs[i],
-        value: v,           // forecast.train expects { date, value }
-      })),
-      future: [],
-      model: "GARCH + Dual-Gated DL",
-      smape: result.metrics_post_dl?.vol_mae_bps ?? 0,
-      mape:  result.metrics_post_dl?.vol_mae_bps ?? 0,
-      differencing: 0,
-      vol_mae_bps: result.metrics_post_dl?.vol_mae_bps,
-      cov_2sig:    result.metrics_post_dl?.cov_2sig,
-      coverage_reliable: result.metrics_post_dl?.coverage_reliable ?? false,
-      test: testData,
-    },
-  }
-  setData(parsed)
-}
+      // Test panel: garch baseline as "actual", DL-corrected as "predicted"
+      const testData = Array.from({ length: n }, (_, i) => ({
+        date: (result.timestamps as string[])[i],
+        actual:    garchVols[i]  ?? 0,
+        predicted: testVols[i]   ?? 0,
+      }))
+
+      const parsed: ParsedData = {
+        headers: ["timestamp", "sigma_bps"],
+        rows: rows, // <--- Data Preview will now work
+        datetimeCol: "timestamp",
+        targetCol: "sigma_bps",
+        numericCols: ["sigma_bps"],
+        timeSeries: fullTimeSeries,
+        stats: {
+          count: count,
+          mean: result.series_stats?.mean ?? mean, // Uses backend if available, fallback to calculated
+          std: result.series_stats?.std ?? std,
+          min: result.series_stats?.min ?? min,
+          max: result.series_stats?.max ?? max,
+          median: median,                          // No longer hardcoded to 0
+          q1: q1,
+          q3: q3,
+          skewness: 0, // Complex to calc on frontend, safe to leave 0 unless needed
+          trend: "stationary",
+          volatility: result.series_stats?.std ?? std, 
+          missingPercent: 0,
+        },
+        frequency: "Hourly",
+        seasonal: false,
+        seasonalStrength: 0,
+        period: null,
+        stationarity: { adfStat: 0, pValue: 0.05, isStationary: true },
+        decomposition: { trend: [], seasonal: [], residual: [] },
+        forecast: {
+          train: trainVols.map((v: number, i: number) => ({
+            date: trainTs[i],
+            value: v,           
+          })),
+          future: [],
+          model: "GARCH + Dual-Gated DL",
+          smape: result.metrics_post_dl?.vol_mae_bps ?? 0,
+          mape:  result.metrics_post_dl?.vol_mae_bps ?? 0,
+          differencing: 0,
+          vol_mae_bps: result.metrics_post_dl?.vol_mae_bps,
+          cov_2sig:    result.metrics_post_dl?.cov_2sig,
+          coverage_reliable: result.metrics_post_dl?.coverage_reliable ?? false,
+          test: testData,
+        },
+      }
+      setData(parsed)
+    }
   }, [])
 
   const handleColumnChange = useCallback(

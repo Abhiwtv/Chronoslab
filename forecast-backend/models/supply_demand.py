@@ -157,18 +157,15 @@ def _check_alpha_breakout(residuals: pd.Series, thresh_ratio: float = 0.05) -> b
     return triggered
 
 def _gated_alpha(
-    corrections: np.ndarray,
-    residuals: np.ndarray,
+    val_corr: float,
     base_alpha: float = 0.40,
     min_corr: float = 0.05,
 ) -> tuple[float, float]:
     print("gate 2")
-    n    = min(len(residuals), len(corrections))
-    corr = np.corrcoef(np.array(residuals)[-n:], corrections[-n:])[0, 1]
-    if np.isnan(corr) or corr <= min_corr:
-        return 0.0, float(corr) if not np.isnan(corr) else 0.0
-    alpha = float(np.clip(base_alpha * corr, 0.05, base_alpha))
-    return alpha, float(corr)
+    if np.isnan(val_corr) or val_corr <= min_corr:
+        return 0.0, float(val_corr) if not np.isnan(val_corr) else 0.0
+    alpha = float(np.clip(base_alpha * val_corr, 0.05, base_alpha))
+    return alpha, float(val_corr)
 
 
 # =============================================================
@@ -195,7 +192,7 @@ def _run_gbr(
     horizon: int,
     test_index,
     window: int = 24,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
     print("   --- GBR CORRECTOR ---")
     smoothed = residuals.rolling(window=3, min_periods=1).mean()
     tf_arr   = _time_features(smoothed.index.append(test_index))
@@ -210,6 +207,10 @@ def _run_gbr(
     )
     gbr.fit(X, y)
     print(f"       GBR trained on {len(X)} samples.")
+    
+    # Calculate in-sample validation correlation for gating
+    train_preds = gbr.predict(X)
+    val_corr = np.corrcoef(y, train_preds)[0, 1]
 
     history = list(res_sc)
     corrs   = []
@@ -219,9 +220,9 @@ def _run_gbr(
                  np.max(lag), np.median(lag), lag[-1], lag[-2], lag[-3]]
         p_sc  = gbr.predict([np.concatenate([lag, stats, tf_arr[len(smoothed) + t]])])[0]
         corrs.append(scaler.inverse_transform([[p_sc]])[0, 0])
-        history.append(p_sc)   # no lookahead — model's own prediction
+        history.append(p_sc)   # no lookahead
 
-    return np.array(corrs)
+    return np.array(corrs), val_corr
 
 
 # =============================================================
@@ -263,7 +264,7 @@ def _run_lstm(
     test_index,
     window: int = 24,
     epochs: int = 120,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
     print("   --- BiLSTM CORRECTOR ---")
     smoothed = residuals.rolling(window=3, min_periods=1).mean()
     tf_arr   = _time_features(smoothed.index.append(test_index))
@@ -294,6 +295,10 @@ def _run_lstm(
                               patience=5, min_lr=1e-5, verbose=0),
         ],
     )
+    
+    # Calculate validation correlation for gating
+    val_preds = model.predict([X_r[-val_n:], X_t[-val_n:]], verbose=0).flatten()
+    val_corr = np.corrcoef(y[-val_n:], val_preds)[0, 1]
 
     history = list(res_sc)
     corrs   = []
@@ -302,9 +307,9 @@ def _run_lstm(
         t_f  = tf_arr[len(smoothed) + t].reshape(1, -1)
         p_sc = model.predict([win, t_f], verbose=0)[0, 0]
         corrs.append(scaler.inverse_transform([[p_sc]])[0, 0])
-        history.append(p_sc)   # no lookahead
+        history.append(p_sc)
 
-    return np.array(corrs)
+    return np.array(corrs), val_corr
 
 
 # =============================================================
@@ -341,18 +346,18 @@ def chronoslab_urban_forecast(
     report    = dict(gbr_alpha=0.0, gbr_corr=0.0, lstm_alpha=0.0, lstm_corr=0.0)
     is_hybrid = False
 
-    if _check_alpha_breakout(residuals_log, thresh=0.01):
-        gbr_corr  = _run_gbr(residuals_log,  horizon, test_log.index)
-        lstm_corr = _run_lstm(residuals_log, horizon, test_log.index)
+    if _check_alpha_breakout(residuals_log, thresh_ratio=0.01): # <--- FIXED PARAMETER NAME
+        gbr_corr_future, gbr_val_corr = _run_gbr(residuals_log,  horizon, test_log.index)
+        lstm_corr_future, lstm_val_corr = _run_lstm(residuals_log, horizon, test_log.index)
 
-        gbr_alpha,  gbr_c  = _gated_alpha(gbr_corr,  residuals_log.values, base_alpha=0.60)
-        lstm_alpha, lstm_c = _gated_alpha(lstm_corr, residuals_log.values, base_alpha=0.80)
+        gbr_alpha,  gbr_c  = _gated_alpha(gbr_val_corr, base_alpha=0.60)
+        lstm_alpha, lstm_c = _gated_alpha(lstm_val_corr, base_alpha=0.80)
 
         print(f"\n   [GATE 2 BLEND]")
         print(f"   GBR  corr={gbr_c:.3f} → α={gbr_alpha:.3f} ({'BLOCKED' if gbr_alpha == 0 else 'APPLIED ✓'})")
         print(f"   LSTM corr={lstm_c:.3f} → α={lstm_alpha:.3f} ({'BLOCKED' if lstm_alpha == 0 else 'APPLIED ✓'})")
 
-        combined        = _safe_forecast(stat_preds_log.values + gbr_alpha * gbr_corr + lstm_alpha * lstm_corr)
+        combined        = _safe_forecast(stat_preds_log.values + gbr_alpha * gbr_corr_future + lstm_alpha * lstm_corr_future)
         final_preds_log = pd.Series(combined, index=test_log.index)
         report          = dict(gbr_alpha=gbr_alpha, gbr_corr=gbr_c,
                                lstm_alpha=lstm_alpha, lstm_corr=lstm_c)
